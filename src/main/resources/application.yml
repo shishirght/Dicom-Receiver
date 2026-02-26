@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: eh-dicom-receiver
+  config:
+    import: optional:configserver:http://10.201.8.192:8888
+  cloud:
+    bus:
+      enabled: true
+
+  kafka:
+    bootstrap-servers: 10.201.8.56:9094
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: busrefresh, refresh, health, info, loggers, env
+
+  endpoint:
+    loggers:
+      enabled: true

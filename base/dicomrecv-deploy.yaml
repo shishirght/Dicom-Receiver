@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dicom-recv-svc
+  namespace: dicomrecv-ns
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dicom-recv-svc
+  template:
+    metadata:
+      labels:
+        app: dicom-recv-svc
+    spec:
+      serviceAccountName: dicomrecv-sa
+      imagePullSecrets:
+        - name: gcp-artifact-secret      
+      containers:
+        - name: dicom-recv-svc
+          image: us-central1-docker.pkg.dev/prj-d-path-integration-cs1h/dicom-recv-svc/dicom_recv_svc-image:__IMAGE_TAG__
+          ports:
+            - containerPort: 8080
+            - containerPort: 2575
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVER
+              value: kafka-0-0.kafka.kafka-ns.svc.cluster.local:9093
+            - name: DB_CONNECTOR_URL
+              value: dbconnector-svc.dbconnector-ns.svc.cluster.local:8081
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /opt/gcp/key.json
+          volumeMounts:
+            - name: gcp-creds
+              mountPath: /opt/gcp
+              readOnly: true
+            - name: kafka-tls
+              mountPath: /opt/kafka/tls
+              readOnly: true
+            - name: receive-data
+              mountPath: /opt/receive
+      volumes:
+        - name: gcp-creds
+          secret:
+            secretName: gcp-sa-key
+        - name: kafka-tls
+          secret:
+            secretName: kafka-1-tls
+        - name: receive-data
+          persistentVolumeClaim:
+            claimName: dicom-recv-pvc

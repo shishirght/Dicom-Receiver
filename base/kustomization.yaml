@@ -1,0 +1,6 @@
+resources:
+    - rbac.yaml
+    - dicomrecv-pvc.yaml
+    - dicomrecv-service.yaml
+    - dicomrecv-deploy.yaml
+  

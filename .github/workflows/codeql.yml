@@ -1,0 +1,52 @@
+name: "CodeQL Security Scan"
+
+on:
+  push:
+    branches: [ main ]        # Run on all branches
+  pull_request:
+    branches: [ main ]        # Run on PRs targeting main
+  schedule:
+    - cron: '26 21 * * 4'       # Every Thursday at 21:26 (9:26 PM)
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+  security-events: write      # Required for Security tab integration
+
+jobs:
+  codeql-analyze:
+    name: CodeQL Security Analysis
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'java' ]   # Add/remove languages as needed
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Java setup for backend services
+      - name: Setup JDK
+        if: matrix.language == 'java'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'   # Match your project’s JDK version
+          distribution: 'temurin'
+
+      # Initialize CodeQL
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: +security-and-quality   # OWASP + CWE + GitHub security rules
+          build-mode: manual
+
+      - name: Build with Maven (verify phase)
+        if: matrix.language == 'java'
+        run: mvn verify -DskipTests
+
+      # Run analysis
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4

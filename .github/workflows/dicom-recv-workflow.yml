@@ -1,0 +1,297 @@
+name: Dicom_Receiver Service Deployment
+
+on:
+  push:
+      
+  workflow_dispatch: # Add this line to enable manual trigger
+    inputs:
+      environment:
+        description: 'Target environment (dev, qa, staging, prod)'
+        required: true
+        default: 'dev'
+
+        
+permissions:
+  contents: read
+  id-token: 'write'
+
+env:
+  PROJECT_ID : prj-d-path-integration-cs1h
+  IMAGE_NAME: dicom_recv_svc-image
+  REPO_NAME: dicom-recv-svc
+  REGION: us-central1
+  CONTAINER: dicomrecv_svc
+
+jobs:     
+
+  sonarqube:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: 'temurin'
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+          
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+          
+      - name: Build and analyze
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information, if any
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_DICOMRECVSVC }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+             mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+             -Dsonar.projectKey="dicomrecv-service" \
+             -Dsonar.projectName="dicomrecv-service" \
+             -Dsonar.token=${{ secrets.SONAR_TOKEN_DICOMRECVSVC }} \
+             -Dsonar.sources=src/main/java \
+             -Dsonar.java.binaries=target/classes \
+             -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+            #  -Dsonar.exclusions=**/*Test.java,**/test/**,**/tests/** \
+            #  -Dsonar.coverage.exclusions=**/*Test.java,**/test/**,**/tests/** \
+            #  -Dmaven.test.skip=true
+
+      - name: Show coverage in console
+        run: |
+          LINE=$(grep 'counter type="INSTRUCTION"' target/site/jacoco/jacoco.xml | head -1)
+      
+          COVERED=$(echo "$LINE" | awk -F'covered="' '{print $2}' | awk -F'"' '{print $1}')
+          MISSED=$(echo "$LINE" | awk -F'missed="' '{print $2}' | awk -F'"' '{print $1}')
+      
+          TOTAL=$((COVERED + MISSED))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No instructions found in jacoco.xml"
+            exit 1
+          fi
+      
+          PERCENT=$((100 * COVERED / TOTAL))
+      
+          echo "Code Coverage for branch ${GITHUB_REF_NAME}: ${PERCENT}%"
+          
+          
+
+      - name: SonarQube Quality Gate
+        run: |
+          response=$(curl -s -u "${{ secrets.SONAR_TOKEN_DICOMRECVSVC }}:" "http://10.201.8.39:9000/api/qualitygates/project_status?projectKey=dicomrecv-service")
+          echo "API Response: $response"
+          status=$(echo $response | jq -r '.projectStatus.status')
+          echo "Quality gate status: $status"
+          if [ "$status" != "OK" ]; then
+           echo "Quality gate failed: $status"
+           exit 1
+          fi
+
+  build:
+#    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: sonarqube
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Build with Maven
+        run: mvn clean package -Dmaven.test.skip=true
+
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicomrecvsvc-artifacts
+          path: target/*.jar
+          retention-days: 1
+       
+  dockerize:
+#    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Create target directory
+        run: mkdir -p target/
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dicomrecvsvc-artifacts
+          path: target/
+
+      - id: auth
+        uses: google-github-actions/auth@v2.0.0  
+        with:
+          workload_identity_provider: '${{ secrets.WORKLOAD_ID }}'
+          service_account: '${{ secrets.SVC_ACCOUNT }}'
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.run_number }} .
+
+      - name: Save Docker image
+        run: |
+          docker save ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.run_number }} | gzip > dicom_recv_svc-docker.tar.gz
+        
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: ./dicom_recv_svc-docker.tar.gz
+          retention-days: 1
+
+  publish:
+#    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [dockerize]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: ./
+        
+      - name: Load Docker image
+        run: |
+          gunzip -c dicom_recv_svc-docker.tar.gz | docker load
+
+      - id: auth
+        uses: google-github-actions/auth@v2.0.0  
+        with:
+          workload_identity_provider: '${{ secrets.WORKLOAD_ID }}'
+          service_account: '${{ secrets.SVC_ACCOUNT }}'
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Push Docker image to GCP
+        run: |
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-${{ github.run_number }}
+
+  docker_deploy:
+#    if: github.ref == 'refs/heads/main'    
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+    needs: [publish]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2.0.0
+        with:
+          workload_identity_provider: '${{ secrets.WORKLOAD_ID }}'
+          service_account: '${{ secrets.SVC_ACCOUNT }}'
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Set IMAGE_TAG
+        run: echo "IMAGE_TAG=${{ github.ref_name }}-${{ github.run_number }}" >> $GITHUB_ENV
+
+      - name: Copy GCP secrets from configserver-ns to dicomrecv-ns
+        if: env.ENVIRONMENT == 'dev'
+        run: |
+          for secret in gcp-sa-key gcp-artifact-secret; do
+  
+            kubectl delete secret $secret -n dicomrecv-ns --ignore-not-found
+  
+            kubectl get secret $secret -n configserver-ns -o yaml \
+            | sed "s/namespace: configserver-ns/namespace: dicomrecv-ns/" \
+            | kubectl apply -f - >/dev/null
+          done
+
+      - name: Copy Kafka TLS secret from kafka-ns to dicomrecv-ns
+        if: env.ENVIRONMENT == 'dev'
+        run: |
+          SECRET_NAME="kafka-1-tls"
+      
+          kubectl delete secret $SECRET_NAME -n dicomrecv-ns --ignore-not-found
+      
+          kubectl get secret $SECRET_NAME -n kafka-ns -o yaml \
+          | sed "s/namespace: kafka-ns/namespace: dicomrecv-ns/" \
+          | kubectl apply -f - >/dev/null
+
+      - name: Ensure dicom-recv PVC is present and bound
+        run: |
+          set -e
+      
+          PVC_NAME="dicom-recv-pvc"
+          NAMESPACE="dicomrecv-ns"
+          PV_NAME="dicom-recv-pv"
+      
+          echo "Checking if PVC $PVC_NAME exists in namespace $NAMESPACE..."
+          if kubectl get pvc "$PVC_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+            echo "PVC $PVC_NAME already exists. Checking binding status..."
+            BOUND_PV=$(kubectl get pvc "$PVC_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.volumeName}')
+            if [ "$BOUND_PV" = "$PV_NAME" ]; then
+              echo "PVC is correctly bound to PV $PV_NAME. Skipping creation."
+            else
+              echo "PVC exists but is bound to a different PV: $BOUND_PV"
+              exit 1
+            fi
+          else
+            echo "PVC $PVC_NAME not found. Creating..."
+          fi
+          
+      - name: Substitute image tag in deployment.yaml
+        run: |
+          sed -i "s|__IMAGE_TAG__|${IMAGE_TAG}|" base/dicomrecv-deploy.yaml
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -k overlays/${{ env.ENVIRONMENT }}
+
+  clean_artifact:
+    runs-on: ubuntu-latest
+    needs: [dockerize, build, publish, docker_deploy]
+#    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Delete artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+              dicomrecvsvc-artifacts
+              docker-image
