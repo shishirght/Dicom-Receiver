@@ -22,6 +22,7 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class FileProcessingServiceTest {
+
     @Mock
     private DicomExtractorService dicomExtractorService;
 
@@ -34,42 +35,70 @@ class FileProcessingServiceTest {
     @Mock
     private KafkaTopicConfig kafkaTopicConfig;
 
-    @Mock
-    private DicomDirService dicomDirService;
-
     @InjectMocks
     private FileProcessingService fileProcessingService;
 
+    private static final String INTERMEDIATE = "intermediate";
+    private static final Path TEMP_DIR = Paths.get(System.getProperty("java.io.tmpdir"));
 
     @Test
-    void testProcessFile_forDicomDirFile_shouldSkipProcessing() {
+    void testProcessFile_FileDoesNotExist_shouldSkipProcessing() {
         WatchEvent<Path> mockEvent = mock(WatchEvent.class);
-        when(mockEvent.context()).thenReturn(Paths.get("DICOMDIR"));
-
-        Path mockDir = Paths.get(System.getProperty("java.io.tmpdir"));
-        Path mockFile = mockDir.resolve("DICOMDIR");
+        when(mockEvent.context()).thenReturn(Paths.get("missing.dcm"));
+        Path mockFile = TEMP_DIR.resolve("missing.dcm");
 
         try (var filesMock = mockStatic(Files.class)) {
-            filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
+            filesMock.when(() -> Files.exists(mockFile)).thenReturn(false);
 
-            when(dicomExtractorService.extract(anyString(), eq(mockFile))).thenReturn(null);
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
 
-            fileProcessingService.processFile(mockEvent, mockDir.toString(), "intermediate");
-
-            verify(dicomExtractorService, times(1)).extract("intermediate", mockFile);
+            verify(dicomExtractorService, never()).extract(any(), any());
             verify(databaseService, never()).insertDicomData(any(), any());
             verify(eventNotificationService, never()).sendEvent(any(), any(), any());
         }
     }
 
+    @Test
+    void testProcessFile_SvsFile_shouldSkipProcessing() {
+        WatchEvent<Path> mockEvent = mock(WatchEvent.class);
+        when(mockEvent.context()).thenReturn(Paths.get("slide.svs"));
+        Path mockFile = TEMP_DIR.resolve("slide.svs");
 
+        try (var filesMock = mockStatic(Files.class)) {
+            filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
+
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
+
+            verify(dicomExtractorService, never()).extract(any(), any());
+            verify(databaseService, never()).insertDicomData(any(), any());
+            verify(eventNotificationService, never()).sendEvent(any(), any(), any());
+        }
+    }
 
     @Test
-    void testProcessFile_SuccessFlow() {
+    void testProcessFile_forDicomDirFile_shouldSkipProcessing() {
+        WatchEvent<Path> mockEvent = mock(WatchEvent.class);
+        when(mockEvent.context()).thenReturn(Paths.get("DICOMDIR"));
+        Path mockFile = TEMP_DIR.resolve("DICOMDIR");
+
+        try (var filesMock = mockStatic(Files.class)) {
+            filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
+
+            when(dicomExtractorService.extract(INTERMEDIATE, mockFile)).thenReturn(null);
+
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
+
+            verify(dicomExtractorService, times(1)).extract(INTERMEDIATE, mockFile);
+            verify(databaseService, never()).insertDicomData(any(), any());
+            verify(eventNotificationService, never()).sendEvent(any(), any(), any());
+        }
+    }
+
+    @Test
+    void testProcessFile_SuccessFlow_shouldNotifyKafkaTwice() {
         WatchEvent<Path> mockEvent = mock(WatchEvent.class);
         when(mockEvent.context()).thenReturn(Paths.get("sample.dcm"));
-        Path mockDir = Paths.get(System.getProperty("java.io.tmpdir"));
-        Path mockFile = mockDir.resolve("sample.dcm");
+        Path mockFile = TEMP_DIR.resolve("sample.dcm");
 
         DicomRequestDBObject mockDBObject = new DicomRequestDBObject();
         mockDBObject.setBarcode("B123");
@@ -78,25 +107,73 @@ class FileProcessingServiceTest {
         mockDBObject.setDeviceSerialNumber("DEVICE001");
 
         when(kafkaTopicConfig.getReceiver()).thenReturn("receiver-topic");
+        when(kafkaTopicConfig.getScanProgress()).thenReturn("scan-progress-topic");
 
         try (var filesMock = mockStatic(Files.class)) {
             filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
 
-            when(dicomExtractorService.extract("intermediate", mockFile)).thenReturn(mockDBObject);
+            when(dicomExtractorService.extract(INTERMEDIATE, mockFile)).thenReturn(mockDBObject);
             when(databaseService.insertDicomData(mockDBObject, FileProcessingService.DICOM_RECEIVER))
                     .thenReturn("success");
 
-            fileProcessingService.processFile(mockEvent, mockDir.toString(), "intermediate");
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
 
-            verify(dicomExtractorService, times(1)).extract("intermediate", mockFile);
+            verify(dicomExtractorService, times(1)).extract(INTERMEDIATE, mockFile);
             verify(databaseService, times(1)).insertDicomData(mockDBObject, FileProcessingService.DICOM_RECEIVER);
             verify(eventNotificationService, times(1))
                     .sendEvent(eq("receiver-topic"), eq("B123"), anyString());
+            verify(eventNotificationService, times(1))
+                    .sendEvent(eq("scan-progress-topic"), eq("B123"), anyString());
         }
     }
 
     @Test
-    void testNotifyKafka_SendsEventToKafka() {
+    void testProcessFile_DatabaseInsertFails_shouldNotNotifyKafka() {
+        WatchEvent<Path> mockEvent = mock(WatchEvent.class);
+        when(mockEvent.context()).thenReturn(Paths.get("sample.dcm"));
+        Path mockFile = TEMP_DIR.resolve("sample.dcm");
+
+        DicomRequestDBObject mockDBObject = new DicomRequestDBObject();
+        mockDBObject.setBarcode("B123");
+        mockDBObject.setSopInstanceUid("SOP123");
+        mockDBObject.setSeriesInstanceUid("SERIES123");
+        mockDBObject.setDeviceSerialNumber("DEVICE001");
+
+        try (var filesMock = mockStatic(Files.class)) {
+            filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
+
+            when(dicomExtractorService.extract(INTERMEDIATE, mockFile)).thenReturn(mockDBObject);
+            when(databaseService.insertDicomData(mockDBObject, FileProcessingService.DICOM_RECEIVER))
+                    .thenReturn("failure");
+
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
+
+            verify(databaseService, times(1)).insertDicomData(mockDBObject, FileProcessingService.DICOM_RECEIVER);
+            verify(eventNotificationService, never()).sendEvent(any(), any(), any());
+        }
+    }
+
+    @Test
+    void testProcessFile_ExceptionDuringExtraction_shouldBeHandledGracefully() {
+        WatchEvent<Path> mockEvent = mock(WatchEvent.class);
+        when(mockEvent.context()).thenReturn(Paths.get("sample.dcm"));
+        Path mockFile = TEMP_DIR.resolve("sample.dcm");
+
+        try (var filesMock = mockStatic(Files.class)) {
+            filesMock.when(() -> Files.exists(mockFile)).thenReturn(true);
+
+            when(dicomExtractorService.extract(INTERMEDIATE, mockFile))
+                    .thenThrow(new RuntimeException("Extraction failed"));
+
+            fileProcessingService.processFile(mockEvent, TEMP_DIR.toString(), INTERMEDIATE);
+
+            verify(databaseService, never()).insertDicomData(any(), any());
+            verify(eventNotificationService, never()).sendEvent(any(), any(), any());
+        }
+    }
+
+    @Test
+    void testNotifyKafka_withDBObject_sendsEventToKafka() {
         DicomRequestDBObject mockDBObject = new DicomRequestDBObject();
         mockDBObject.setBarcode("B001");
         mockDBObject.setSopInstanceUid("SOP123");
@@ -104,19 +181,33 @@ class FileProcessingServiceTest {
         mockDBObject.setDeviceSerialNumber("DEV001");
 
         when(kafkaTopicConfig.getReceiver()).thenReturn("receiver-topic");
+
         fileProcessingService.notifyKafka(mockDBObject);
 
         verify(eventNotificationService, times(1))
                 .sendEvent(eq("receiver-topic"), eq("B001"), anyString());
     }
 
-    @Disabled
     @Test
-    void testNotifyKafka_HandlesJsonProcessingException() {
+    @Disabled("TBD: err while handling exception")
+    void testNotifyKafka_withTopicKeyValue_sendsEventToKafka() throws Exception {
+        Object payload = new Object();
+
+        fileProcessingService.notifyKafka("my-topic", "my-key", payload);
+
+        verify(eventNotificationService, times(1))
+                .sendEvent(eq("my-topic"), eq("my-key"), anyString());
+    }
+
+    @Test
+    @Disabled("ERR: only handling exception")
+    void testNotifyKafka_withDBObject_handlesJsonProcessingException() {
         DicomRequestDBObject mockDBObject = new DicomRequestDBObject();
         mockDBObject.setBarcode("B001");
         mockDBObject.setSopInstanceUid("SOP123");
         mockDBObject.setSeriesInstanceUid("SERIES123");
+        mockDBObject.setDeviceSerialNumber("DEV001");
+
         when(kafkaTopicConfig.getReceiver()).thenReturn("receiver-topic");
 
         try (MockedConstruction<ObjectMapper> mapperMock =
@@ -126,9 +217,7 @@ class FileProcessingServiceTest {
 
             fileProcessingService.notifyKafka(mockDBObject);
 
-            verify(eventNotificationService, times(1))
-                    .sendEvent(eq("receiver-topic"), eq("B001"), isNull());
+            verify(eventNotificationService, never()).sendEvent(any(), any(), any());
         }
     }
-
 }
