@@ -2,7 +2,6 @@ package com.eh.digitalpathology.dicomreceiver.service;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mock;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -11,12 +10,10 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class RedisClientTest  {
-    @Mock
+class RedisClientTest {
+
     private RedisTemplate<String, Object> redisTemplate;
-    @Mock
     private ValueOperations<String, Object> valueOperations;
-    @Mock
     private RedisClient redisClient;
 
     @BeforeEach
@@ -24,7 +21,6 @@ class RedisClientTest  {
         redisTemplate = mock(RedisTemplate.class);
         valueOperations = mock(ValueOperations.class);
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
         redisClient = new RedisClient(redisTemplate);
     }
 
@@ -32,9 +28,7 @@ class RedisClientTest  {
     void testIsFileProcessed_WhenKeyExists_ShouldReturnTrue() {
         when(redisTemplate.hasKey("file1")).thenReturn(true);
 
-        boolean result = redisClient.isFileProcessed("file1");
-
-        assertTrue(result);
+        assertTrue(redisClient.isFileProcessed("file1"));
         verify(redisTemplate).hasKey("file1");
     }
 
@@ -42,45 +36,90 @@ class RedisClientTest  {
     void testIsFileProcessed_WhenKeyDoesNotExist_ShouldReturnFalse() {
         when(redisTemplate.hasKey("file2")).thenReturn(false);
 
-        boolean result = redisClient.isFileProcessed("file2");
-
-        assertFalse(result);
+        assertFalse(redisClient.isFileProcessed("file2"));
         verify(redisTemplate).hasKey("file2");
     }
 
     @Test
-    void testMarkFileAsProcessed_shouldStoreKey() {
+    void testIsFileProcessed_WhenHasKeyReturnsNull_ShouldReturnFalse() {
+        when(redisTemplate.hasKey("fileNull")).thenReturn(null);
+
+        assertFalse(redisClient.isFileProcessed("fileNull"));
+    }
+
+    @Test
+    void testIsFileProcessed_WhenRedisThrowsException_ShouldReturnFalse() {
+        when(redisTemplate.hasKey("fileEx")).thenThrow(new RuntimeException("Redis down"));
+
+        assertFalse(redisClient.isFileProcessed("fileEx"));
+    }
+
+    @Test
+    void testMarkFileAsProcessed_shouldStoreKeyWithTwelveHourTTL() {
         String fileKey = "file3";
         Duration expectedDuration = Duration.ofHours(12);
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         redisClient.markFileAsProcessed(fileKey);
 
-        verify(redisTemplate).opsForValue();
         verify(valueOperations).set(fileKey, "processed", expectedDuration);
-
     }
+
     @Test
-    void tryLockFile_shouldReturnTrue_whenLockIsAcquired() {
+    void testTryLockFile_WhenLockAcquired_ShouldReturnTrue() {
         String fileKey = "file1";
         Duration lockDuration = Duration.ofMinutes(10);
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(valueOperations.setIfAbsent(fileKey + ":lock", "LOCKED", lockDuration)).thenReturn(true);
 
-        boolean result = redisClient.tryLockFile(fileKey, lockDuration);
-
-        assertTrue(result);
-        verify(redisTemplate).opsForValue();
+        assertTrue(redisClient.tryLockFile(fileKey, lockDuration));
         verify(valueOperations).setIfAbsent(fileKey + ":lock", "LOCKED", lockDuration);
     }
 
     @Test
-    void releaseFileLock_shouldDeleteLockKey() {
+    void testTryLockFile_WhenLockAlreadyHeld_ShouldReturnFalse() {
+        String fileKey = "file2";
+        Duration lockDuration = Duration.ofMinutes(10);
+
+        when(valueOperations.setIfAbsent(fileKey + ":lock", "LOCKED", lockDuration)).thenReturn(false);
+
+        assertFalse(redisClient.tryLockFile(fileKey, lockDuration));
+    }
+
+    @Test
+    void testTryLockFile_WhenSetIfAbsentReturnsNull_ShouldReturnFalse() {
+        String fileKey = "fileNull";
+        Duration lockDuration = Duration.ofMinutes(10);
+
+        when(valueOperations.setIfAbsent(fileKey + ":lock", "LOCKED", lockDuration)).thenReturn(null);
+
+        assertFalse(redisClient.tryLockFile(fileKey, lockDuration));
+    }
+
+    @Test
+    void testTryLockFile_WhenRedisThrowsException_ShouldReturnFalse() {
+        String fileKey = "fileEx";
+        Duration lockDuration = Duration.ofMinutes(10);
+
+        when(redisTemplate.opsForValue()).thenThrow(new RuntimeException("Redis down"));
+
+        assertFalse(redisClient.tryLockFile(fileKey, lockDuration));
+    }
+
+    @Test
+    void testReleaseFileLock_shouldDeleteLockKey() {
         String fileKey = "file3";
+
         redisClient.releaseFileLock(fileKey);
 
         verify(redisTemplate).delete(fileKey + ":lock");
     }
 
+    @Test
+    void testReleaseFileLock_WhenRedisThrowsException_ShouldNotPropagate() {
+        String fileKey = "fileEx";
+
+        doThrow(new RuntimeException("Redis down")).when(redisTemplate).delete(fileKey + ":lock");
+
+        assertDoesNotThrow(() -> redisClient.releaseFileLock(fileKey));
+    }
 }
