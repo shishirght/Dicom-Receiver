@@ -188,4 +188,50 @@ class DicomHealthcareApiClientTest {
     }
 
 
+
+    @Test
+    void testHandleWriteTask_WhenFutureThrowsExecutionException_ShouldInterruptThread() throws Exception {
+        Future<Object> mockFuture = mock(Future.class); // Use Future<Object> not Future<?>
+
+        when(mockFuture.get(5L, TimeUnit.MINUTES))  // Match exact args from source
+                .thenThrow(new ExecutionException("Write failed", new RuntimeException("cause")));
+
+        assertDoesNotThrow(() ->
+                ReflectionTestUtils.invokeMethod(client, "handleWriteTask", (Object) mockFuture));
+
+        assertTrue(Thread.interrupted()); // clears flag too, keeping tests isolated
+    }
+
+
+    @Test
+    void testHandleWriteTask_WhenFutureThrowsInterruptedException_ShouldInterruptThread() throws Exception {
+        Future<Object> mockFuture = mock(Future.class);
+
+        // Use lenient stubbing to avoid strict mismatch errors
+        lenient().when(mockFuture.get(eq(5L), any(TimeUnit.class)))
+                .thenThrow(new InterruptedException("Interrupted"));
+
+        // Run the method under test
+        assertDoesNotThrow(() ->
+                ReflectionTestUtils.invokeMethod(client, "handleWriteTask", (Object) mockFuture));
+
+        // Check that the thread was interrupted (without clearing the flag)
+        assertTrue(Thread.currentThread().isInterrupted(),
+                "Thread should be interrupted after InterruptedException");
+    }
+
+
+    @Test
+    void testHandleWriteTask_WhenFutureTimesOut_ShouldCancelTask() throws Exception {
+        Future<Object> mockFuture = mock(Future.class);
+
+        when(mockFuture.get(5L, TimeUnit.MINUTES))
+                .thenThrow(new TimeoutException("Timed out"));
+
+        assertDoesNotThrow(() ->
+                ReflectionTestUtils.invokeMethod(client, "handleWriteTask", (Object) mockFuture));
+
+        verify(mockFuture).cancel(true);
+    }
+
 }

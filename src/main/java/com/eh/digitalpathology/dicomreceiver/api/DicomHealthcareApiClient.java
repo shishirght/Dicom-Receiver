@@ -129,4 +129,8 @@ public class DicomHealthcareApiClient {
         }
 
     }
+
+
+
+
 }

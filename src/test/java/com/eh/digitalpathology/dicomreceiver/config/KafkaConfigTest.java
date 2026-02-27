@@ -44,6 +44,7 @@ class KafkaConfigTest {
         assertEquals("true", props.get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
     }
 
+
     @Test
     @DisplayName("customKafkaTemplate(): is created from the configured producerFactory")
     void customKafkaTemplate_constructs() throws Exception {
@@ -71,4 +72,6 @@ class KafkaConfigTest {
                 factory.getContainerProperties().getAckMode()
         );
     }
+
+
 }

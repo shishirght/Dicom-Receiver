@@ -62,4 +62,6 @@ public class KafkaConfig {
                 (consumerRecord, exception) -> new TopicPartition("dead-letter-topic", consumerRecord.partition()));
         return new DefaultErrorHandler(recoverer, new FixedBackOff(0L, 3)); // Retry 3 times with no delay
     }
+
+
 }
