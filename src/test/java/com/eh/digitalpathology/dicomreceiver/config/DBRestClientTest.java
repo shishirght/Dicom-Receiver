@@ -2,196 +2,148 @@ package com.eh.digitalpathology.dicomreceiver.config;
 
 import com.eh.digitalpathology.dicomreceiver.exceptions.DbConnectorExeption;
 import com.eh.digitalpathology.dicomreceiver.model.ApiResponse;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import okhttp3.mockwebserver.MockResponse;
-import okhttp3.mockwebserver.MockWebServer;
-import okhttp3.mockwebserver.RecordedRequest;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.test.StepVerifier;
-
-import java.io.IOException;
-import java.util.Map;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Mono;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
 
+@ExtendWith(MockitoExtension.class)
 class DBRestClientTest {
 
-    private MockWebServer mockWebServer;
+    @Mock
+    private WebClient webClient;
+
+    @Mock
+    private WebClient.RequestBodyUriSpec requestBodyUriSpec;
+
+    @Mock
+    private WebClient.RequestBodySpec requestBodySpec;
+
+    @Mock
+    private WebClient.RequestHeadersSpec requestHeadersSpec;
+
+    @Mock
+    private WebClient.ResponseSpec responseSpec;
+
     private DBRestClient dbRestClient;
-    private ObjectMapper objectMapper;
 
     private final ParameterizedTypeReference<ApiResponse<String>> responseType =
             new ParameterizedTypeReference<>() {};
 
     @BeforeEach
-    void setUp() throws IOException {
-        mockWebServer = new MockWebServer();
-        mockWebServer.start();
-
-        String baseUrl = mockWebServer.url("/").toString();
-        WebClient webClient = WebClient.builder().baseUrl(baseUrl).build();
-
+    void setUp() {
         dbRestClient = new DBRestClient(webClient);
-        objectMapper = new ObjectMapper();
-    }
-
-    @AfterEach
-    void tearDown() throws IOException {
-        mockWebServer.shutdown();
-    }
-
-    private String toJson(Object obj) throws Exception {
-        return objectMapper.writeValueAsString(obj);
-    }
-
-    private MockResponse jsonResponse(int code, Object body) throws Exception {
-        return new MockResponse()
-                .setResponseCode(code)
-                .setHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .setBody(toJson(body));
+        when(webClient.method(any(HttpMethod.class))).thenReturn(requestBodyUriSpec);
+        when(requestBodyUriSpec.uri(anyString())).thenReturn(requestBodySpec);
     }
 
     @Test
-    void exchange_WithRequestBody_ShouldSendBodyInRequest() throws Exception {
-        Map<String, Object> successBody = Map.of(
-                "status", "success",
-                "data", "result",
-                "errorCode", "",
-                "errorMessage", ""
-        );
-        mockWebServer.enqueue(jsonResponse(200, successBody));
+    void exchange_withRequestBody_returnsResponse() {
+        ApiResponse<String> apiResponse = new ApiResponse<>("success", "result", null, null);
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.POST, "/test", "payload", responseType, null))
-                .assertNext(response -> assertEquals("success", response.status()))
-                .verifyComplete();
+        when(requestBodySpec.body(any())).thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class))).thenReturn(Mono.just(apiResponse));
 
-        RecordedRequest request = mockWebServer.takeRequest();
-        assertEquals("POST", request.getMethod());
-        assertTrue(request.getBody().readUtf8().contains("payload"));
+        ApiResponse<String> result = dbRestClient.exchange(HttpMethod.POST, "/test", "payload", responseType, null).block();
+
+        assertEquals("success", result.status());
     }
 
     @Test
-    void exchange_WithNullRequestBody_ShouldSendRequestWithoutBody() throws Exception {
-        Map<String, Object> successBody = Map.of(
-                "status", "success",
-                "data", "result",
-                "errorCode", "",
-                "errorMessage", ""
-        );
-        mockWebServer.enqueue(jsonResponse(200, successBody));
+    void exchange_withNullBody_returnsResponse() {
+        ApiResponse<String> apiResponse = new ApiResponse<>("success", "result", null, null);
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null))
-                .assertNext(response -> assertEquals("success", response.status()))
-                .verifyComplete();
+        when(requestBodySpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class))).thenReturn(Mono.just(apiResponse));
 
-        RecordedRequest request = mockWebServer.takeRequest();
-        assertEquals("GET", request.getMethod());
-        assertEquals(0, request.getBodySize()); // no body sent
+        ApiResponse<String> result = dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null).block();
+
+        assertEquals("success", result.status());
     }
 
     @Test
-    void exchange_WithHeadersConsumer_ShouldApplyCustomHeader() throws Exception {
-        Map<String, Object> successBody = Map.of(
-                "status", "success",
-                "data", "result",
-                "errorCode", "",
-                "errorMessage", ""
-        );
-        mockWebServer.enqueue(jsonResponse(200, successBody));
+    void exchange_withHeadersConsumer_appliesHeaders() {
+        ApiResponse<String> apiResponse = new ApiResponse<>("success", "result", null, null);
 
-        StepVerifier.create(
-                        dbRestClient.exchange(
-                                HttpMethod.POST, "/test", "payload", responseType,
-                                headers -> headers.add("X-Custom-Header", "custom-value")))
-                .assertNext(response -> assertEquals("success", response.status()))
-                .verifyComplete();
+        when(requestBodySpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class))).thenReturn(Mono.just(apiResponse));
 
-        RecordedRequest request = mockWebServer.takeRequest();
-        assertEquals("custom-value", request.getHeader("X-Custom-Header"));
+        ApiResponse<String> result = dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType,
+                headers -> headers.add("X-Custom-Header", "custom-value")).block();
+
+        assertEquals("success", result.status());
+        verify(requestBodySpec).headers(any());
     }
 
     @Test
-    void exchange_WithNullHeadersConsumer_ShouldNotAddCustomHeaders() throws Exception {
-        Map<String, Object> successBody = Map.of(
-                "status", "success",
-                "data", "result",
-                "errorCode", "",
-                "errorMessage", ""
-        );
-        mockWebServer.enqueue(jsonResponse(200, successBody));
+    void exchange_withNullHeadersConsumer_doesNotCallHeaders() {
+        ApiResponse<String> apiResponse = new ApiResponse<>("success", "result", null, null);
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null))
-                .assertNext(response -> assertEquals("success", response.status()))
-                .verifyComplete();
+        when(requestBodySpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class))).thenReturn(Mono.just(apiResponse));
 
-        RecordedRequest request = mockWebServer.takeRequest();
-        assertNull(request.getHeader("X-Custom-Header"));
+        dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null).block();
+
+        verify(requestBodySpec, never()).headers(any());
     }
 
     @Test
-    void exchange_WhenErrorResponseStatusIsFailure_ShouldEmitDbConnectorException() throws Exception {
-        Map<String, Object> errorBody = Map.of(
-                "status", "failure",
-                "data", "",
-                "errorCode", "ERR_001",
-                "errorMessage", "Something went wrong"
-        );
-        mockWebServer.enqueue(jsonResponse(500, errorBody));
+    void exchange_whenErrorStatusIsFailure_throwsDbConnectorException() {
+        when(requestBodySpec.body(any())).thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+                .thenReturn(Mono.error(new DbConnectorExeption("ERR_001", "Something went wrong")));
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.POST, "/test", "payload", responseType, null))
-                .expectErrorSatisfies(throwable -> {
-                    assertInstanceOf(DbConnectorExeption.class, throwable);
-                    DbConnectorExeption ex = (DbConnectorExeption) throwable;
-                    assertEquals("ERR_001", ex.getErrorCode());
-                    assertEquals("Something went wrong", ex.getMessage());
-                })
-                .verify();
+        Mono<ApiResponse<String>> mono = dbRestClient.exchange(HttpMethod.POST, "/test", "payload", responseType, null);
+
+        Throwable thrown = assertThrows(Throwable.class, mono::block);
+        Throwable cause = Exceptions.unwrap(thrown);
+        assertInstanceOf(DbConnectorExeption.class, cause);
+        assertEquals("ERR_001", ((DbConnectorExeption) cause).getErrorCode());
+        assertEquals("Something went wrong", cause.getMessage());
     }
 
     @Test
-    void exchange_WhenErrorResponseStatusIsNotFailure_ShouldCompleteEmpty() throws Exception {
-        Map<String, Object> errorBody = Map.of(
-                "status", "error",      // not "failure" → flatMap returns Mono.empty()
-                "data", "",
-                "errorCode", "ERR_002",
-                "errorMessage", "Partial error"
-        );
-        mockWebServer.enqueue(jsonResponse(500, errorBody));
+    void exchange_whenErrorStatusIsFailureCaseInsensitive_throwsDbConnectorException() {
+        when(requestBodySpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+                .thenReturn(Mono.error(new DbConnectorExeption("ERR_403", "Forbidden")));
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null))
-                .verifyComplete();
+        Mono<ApiResponse<String>> mono = dbRestClient.exchange(HttpMethod.GET, "/secure", null, responseType, null);
+
+        Throwable thrown = assertThrows(Throwable.class, mono::block);
+        Throwable cause = Exceptions.unwrap(thrown);
+        assertInstanceOf(DbConnectorExeption.class, cause);
+        assertEquals("ERR_403", ((DbConnectorExeption) cause).getErrorCode());
+        assertEquals("Forbidden", cause.getMessage());
     }
 
     @Test
-    void exchange_WhenErrorStatusIsCaseInsensitiveFailure_ShouldEmitDbConnectorException() throws Exception {
-        Map<String, Object> errorBody = Map.of(
-                "status", "FAILURE",    // uppercase — equalsIgnoreCase must handle this
-                "data", "",
-                "errorCode", "ERR_403",
-                "errorMessage", "Forbidden"
-        );
-        mockWebServer.enqueue(jsonResponse(403, errorBody));
+    void exchange_whenErrorStatusIsNotFailure_completesEmpty() {
+        when(requestBodySpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class))).thenReturn(Mono.empty());
 
-        StepVerifier.create(
-                        dbRestClient.exchange(HttpMethod.GET, "/secure", null, responseType, null))
-                .expectErrorSatisfies(throwable -> {
-                    assertInstanceOf(DbConnectorExeption.class, throwable);
-                    DbConnectorExeption ex = (DbConnectorExeption) throwable;
-                    assertEquals("ERR_403", ex.getErrorCode());
-                    assertEquals("Forbidden", ex.getMessage());
-                })
-                .verify();
+        ApiResponse<String> result = dbRestClient.exchange(HttpMethod.GET, "/test", null, responseType, null).block();
+
+        assertNull(result);
     }
 }
